@@ -54,9 +54,22 @@ def convert_retail_sales(retail_path_or_file) -> pd.DataFrame:
     df = df[df["Description"].notna()].copy()
     df = df[df["Description"] != "Grand Total"].copy()
 
-    # Promote headers: first remaining row becomes headers
-    headers = [str(h).replace("\u00a0", " ").strip() for h in df.iloc[0].tolist()]
-    df2 = df.iloc[1:].copy()
+    # --- Find the real header row dynamically ---
+    header_idx = None
+    for i, row in df.iterrows():
+        cells = [str(x).strip().lower() for x in row.tolist()]
+        if "description" in cells and any("qty" in c or "quantity" in c for c in cells):
+            header_idx = i
+            break
+    
+    if header_idx is None:
+        raise ValueError(
+            "Could not locate header row containing 'Description' and 'Qty'. "
+            f"Sample rows: {df.head(10).values.tolist()}"
+        )
+    
+    headers = [str(x).replace("\u00a0", " ").strip() for x in df.loc[header_idx].tolist()]
+    df2 = df.loc[header_idx + 1:].copy()
     df2.columns = headers
 
     # --- Robust column mapping (headers vary across exports) ---
