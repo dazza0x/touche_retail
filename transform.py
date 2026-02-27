@@ -43,37 +43,64 @@ def load_price_list(price_path_or_file) -> pd.DataFrame:
 def convert_retail_sales(retail_path_or_file) -> pd.DataFrame:
     raw = pd.read_excel(retail_path_or_file, sheet_name="Retail Sales by Team Memb", header=None)
 
-    # PowerQuery kept: Column2, Column7, Column11, Column13, Column15
-    # After removing columns and promoting headers, these become:
-    # Description, Qty, Exc Vat, Inc Vat, Gross Profit
-    keep_idx = [1, 6, 10, 12, 14]  # 0-based indexes
+    # Keep same physical columns as your Power Query after removals:
+    # Column2, Column7, Column11, Column13, Column15 (1-based)
+    keep_idx = [1, 6, 10, 12, 14]  # 0-based
     df = raw.iloc[:, keep_idx].copy()
     df.columns = ["Description", "Qty", "Exc Vat", "Inc Vat", "Gross Profit"]
 
-    # Filter rows where Column2 (Description) not null and not "Grand Total"
+    # Filter rows where Description not null and not "Grand Total"
     df["Description"] = df["Description"].apply(_norm_text)
     df = df[df["Description"].notna()].copy()
     df = df[df["Description"] != "Grand Total"].copy()
 
-    # Promote headers: first row is headers
-    headers = df.iloc[0].tolist()
+    # Promote headers: first remaining row becomes headers
+    headers = [str(h).replace("\u00a0", " ").strip() for h in df.iloc[0].tolist()]
     df2 = df.iloc[1:].copy()
     df2.columns = headers
 
+    # --- Robust column mapping (headers vary across exports) ---
+    # Find likely columns
+    def pick(colnames, candidates):
+        lower = {c.lower(): c for c in colnames}
+        for cand in candidates:
+            if cand.lower() in lower:
+                return lower[cand.lower()]
+        # partial
+        for c in colnames:
+            cl = c.lower()
+            for cand in candidates:
+                if cand.lower() in cl:
+                    return c
+        return None
+
+    desc_col = pick(df2.columns, ["Description", "Product", "Item"])
+    qty_col  = pick(df2.columns, ["Qty", "Quantity", "QTY"])
+    inc_col  = pick(df2.columns, ["Inc Vat", "Inc VAT", "Inc. Vat", "Inc", "IncVat"])
+    exc_col  = pick(df2.columns, ["Exc Vat", "Exc VAT", "Exc. Vat", "Exc", "ExcVat"])
+    gp_col   = pick(df2.columns, ["Gross Profit", "Grossprofit", "Profit"])
+
+    if desc_col is None:
+        raise ValueError(f"Could not find a Description column after header promotion. Columns: {list(df2.columns)}")
+    if qty_col is None:
+        raise ValueError(f"Could not find a Qty/Quantity column after header promotion. Columns: {list(df2.columns)}")
+
+    # Standardise to expected names
+    rename_map = {desc_col: "Description", qty_col: "Qty"}
+    if inc_col: rename_map[inc_col] = "Inc Vat"
+    if exc_col: rename_map[exc_col] = "Exc Vat"
+    if gp_col:  rename_map[gp_col]  = "Gross Profit"
+    df2 = df2.rename(columns=rename_map)
+
     # Type conversions
-    for c in ["Description"]:
-        if c in df2.columns:
-            df2[c] = df2[c].apply(_norm_text)
-    for c in ["Qty"]:
-        if c in df2.columns:
-            df2[c] = pd.to_numeric(df2[c], errors="coerce")
+    df2["Description"] = df2["Description"].apply(_norm_text)
+    df2["Qty"] = pd.to_numeric(df2["Qty"], errors="coerce")
     for c in ["Inc Vat", "Exc Vat", "Gross Profit"]:
         if c in df2.columns:
             df2[c] = pd.to_numeric(df2[c], errors="coerce")
 
     # Remove "Inspired Hair Supplies" line
-    if "Description" in df2.columns:
-        df2 = df2[df2["Description"] != "Inspired Hair Supplies"].copy()
+    df2 = df2[df2["Description"] != "Inspired Hair Supplies"].copy()
 
     # Add Stylist column: if Qty is null then Stylist name is Description
     df2["Stylist"] = np.where(df2["Qty"].isna(), df2["Description"], np.nan)
@@ -81,13 +108,15 @@ def convert_retail_sales(retail_path_or_file) -> pd.DataFrame:
     # Fill Up (Power Query): fill missing stylist from the row below => reverse ffill then reverse back
     df2["Stylist"] = pd.Series(df2["Stylist"])[::-1].ffill()[::-1]
 
-    # Reorder + filter only rows where Qty not null
-    df2 = df2[["Stylist", "Description", "Qty", "Exc Vat", "Inc Vat", "Gross Profit"]].copy()
+    # Keep only actual product lines (Qty not null)
     df2 = df2[df2["Qty"].notna()].copy()
 
-    # Remove Gross Profit and Exc Vat per query
-    drop_cols = [c for c in ["Gross Profit", "Exc Vat"] if c in df2.columns]
-    df2.drop(columns=drop_cols, inplace=True)
+    # Build final columns; drop unneeded if present
+    keep_cols = ["Stylist", "Description", "Qty"]
+    if "Inc Vat" in df2.columns:
+        keep_cols.append("Inc Vat")
+    # PQ removes Gross Profit and Exc Vat; keep only Inc Vat for reference
+    df2 = df2[keep_cols].copy()
 
     # Normalise fields
     df2["Stylist"] = df2["Stylist"].apply(_norm_text)
