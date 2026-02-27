@@ -54,22 +54,9 @@ def convert_retail_sales(retail_path_or_file) -> pd.DataFrame:
     df = df[df["Description"].notna()].copy()
     df = df[df["Description"] != "Grand Total"].copy()
 
-    # --- Find the real header row dynamically ---
-    header_idx = None
-    for i, row in df.iterrows():
-        cells = [str(x).strip().lower() for x in row.tolist()]
-        if "description" in cells and any("qty" in c or "quantity" in c for c in cells):
-            header_idx = i
-            break
-    
-    if header_idx is None:
-        raise ValueError(
-            "Could not locate header row containing 'Description' and 'Qty'. "
-            f"Sample rows: {df.head(10).values.tolist()}"
-        )
-    
-    headers = [str(x).replace("\u00a0", " ").strip() for x in df.loc[header_idx].tolist()]
-    df2 = df.loc[header_idx + 1:].copy()
+    # Promote headers: first remaining row becomes headers
+    headers = [str(h).replace("\u00a0", " ").strip() for h in df.iloc[0].tolist()]
+    df2 = df.iloc[1:].copy()
     df2.columns = headers
 
     # --- Robust column mapping (headers vary across exports) ---
@@ -115,11 +102,15 @@ def convert_retail_sales(retail_path_or_file) -> pd.DataFrame:
     # Remove "Inspired Hair Supplies" line
     df2 = df2[df2["Description"] != "Inspired Hair Supplies"].copy()
 
-    # Add Stylist column: if Qty is null then Stylist name is Description
-    df2["Stylist"] = np.where(df2["Qty"].isna(), df2["Description"], np.nan)
+    # Add Stylist marker: if Qty is null then this row is a stylist header (often above OR below blocks)
+    stylist_marker = pd.Series(np.where(df2["Qty"].isna(), df2["Description"], np.nan), index=df2.index)
 
-    # Fill Up (Power Query): fill missing stylist from the row below => reverse ffill then reverse back
-    df2["Stylist"] = pd.Series(df2["Stylist"])[::-1].ffill()[::-1]
+    # Some exports place the stylist name ABOVE the product lines (needs FillDown),
+    # others place it BELOW (needs FillUp). Do both and combine.
+    stylist_up = stylist_marker[::-1].ffill()[::-1]   # FillUp equivalent
+    stylist_down = stylist_marker.ffill()             # FillDown equivalent
+
+    df2["Stylist"] = stylist_up.fillna(stylist_down)
 
     # Keep only actual product lines (Qty not null)
     df2 = df2[df2["Qty"].notna()].copy()
